@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import ctypes
 from ctypes import wintypes
-from dataclasses import dataclass
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -22,20 +21,6 @@ from raw_input_tracker import RawInputTracker
 
 APP_NAME = "PresenceGuard"
 ERROR_ALREADY_EXISTS = 183
-HWND_BROADCAST = 0xFFFF
-WM_SYSCOMMAND = 0x0112
-SC_MONITORPOWER = 0xF170
-MONITOR_OFF = 2
-SMTO_ABORTIFHUNG = 0x0002
-
-
-@dataclass
-class MonitorOffState:
-    sleep_deadline: float
-    activity_sequence: int
-    intentional_sequence: int
-    cursor_distance: float
-    movement_pending: bool = False
 
 
 def app_data_dir() -> Path:
@@ -136,46 +121,12 @@ def sleep_windows() -> None:
         raise ctypes.WinError()
 
 
-def turn_off_monitors() -> None:
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    user32.SendMessageTimeoutW.argtypes = [
-        wintypes.HWND,
-        wintypes.UINT,
-        wintypes.WPARAM,
-        wintypes.LPARAM,
-        wintypes.UINT,
-        wintypes.UINT,
-        ctypes.POINTER(ctypes.c_size_t),
-    ]
-    user32.SendMessageTimeoutW.restype = wintypes.LPARAM
-    result = ctypes.c_size_t()
-    if user32.SendMessageTimeoutW(
-        HWND_BROADCAST,
-        WM_SYSCOMMAND,
-        SC_MONITORPOWER,
-        MONITOR_OFF,
-        SMTO_ABORTIFHUNG,
-        2_000,
-        ctypes.byref(result),
-    ):
-        return
-
-    # A hung top-level window can make the broadcast time out even when other
-    # recipients handled it. Queue a fallback rather than abandoning standby.
-    if not user32.PostMessageW(
-        HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, MONITOR_OFF
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Turn off monitors, then sleep Windows when idle and no face is visible"
+        description="Sleep Windows when idle and no face is visible"
     )
-    parser.add_argument("--idle-seconds", type=float, default=180)
+    parser.add_argument("--idle-seconds", type=float, default=300)
     parser.add_argument("--recheck-seconds", type=float, default=30)
-    parser.add_argument("--sleep-delay-seconds", type=float, default=600)
-    parser.add_argument("--cursor-distance", type=float, default=40)
     parser.add_argument("--poll-seconds", type=float, default=2)
     parser.add_argument("--heartbeat-seconds", type=float, default=300)
     parser.add_argument("--resume-grace-seconds", type=float, default=120)
@@ -193,8 +144,6 @@ def validate_args(args: argparse.Namespace) -> None:
     positive = (
         "idle_seconds",
         "recheck_seconds",
-        "sleep_delay_seconds",
-        "cursor_distance",
         "poll_seconds",
         "heartbeat_seconds",
         "resume_grace_seconds",
@@ -245,14 +194,13 @@ def main() -> int:
     )
     next_check = 0.0
     next_heartbeat = time.monotonic() + args.heartbeat_seconds
-    monitor_off: MonitorOffState | None = None
 
     try:
         while not stopping:
             try:
                 input_tracker.check_health()
             except RuntimeError:
-                logging.exception("Raw Input listener failed; disabling power actions")
+                logging.exception("Raw Input listener failed; disabling sleep")
                 break
 
             snapshot = input_tracker.activity_snapshot()
@@ -262,59 +210,7 @@ def main() -> int:
                 logging.info("Heartbeat: Raw Input idle for %.1fs", idle)
                 next_heartbeat = now + args.heartbeat_seconds
 
-            if monitor_off is not None:
-                cursor_travel = snapshot.cursor_distance - monitor_off.cursor_distance
-                if snapshot.intentional_sequence != monitor_off.intentional_sequence:
-                    logging.info(
-                        "Keyboard/button input resumed; delayed sleep cancelled: %s",
-                        snapshot.detail,
-                    )
-                    monitor_off = None
-                    next_check = 0.0
-                elif snapshot.activity_sequence != monitor_off.activity_sequence:
-                    monitor_off.activity_sequence = snapshot.activity_sequence
-                    monitor_off.movement_pending = True
-                    if cursor_travel >= args.cursor_distance:
-                        logging.info(
-                            "Cursor traveled %.1fpx; delayed sleep cancelled: %s",
-                            cursor_travel,
-                            snapshot.detail,
-                        )
-                        monitor_off = None
-                        next_check = 0.0
-                elif monitor_off.movement_pending and now - snapshot.last_activity >= 1.0:
-                    logging.info(
-                        "Cursor movement settled at %.1fpx below threshold; preserving delayed sleep",
-                        cursor_travel,
-                    )
-                    if not args.dry_run:
-                        try:
-                            turn_off_monitors()
-                        except OSError:
-                            logging.exception("Monitor standby request failed")
-                    monitor_off.cursor_distance = snapshot.cursor_distance
-                    monitor_off.movement_pending = False
-                elif now >= monitor_off.sleep_deadline:
-                    # Do not suspend if an event arrived after this loop's snapshot.
-                    final_snapshot = input_tracker.activity_snapshot()
-                    if final_snapshot.activity_sequence != snapshot.activity_sequence:
-                        continue
-                    if args.dry_run:
-                        logging.warning("DRY RUN: delayed sleep expired; would sleep Windows")
-                        monitor_off = None
-                        next_check = now + args.recheck_seconds
-                    else:
-                        logging.warning("No physical input during monitor-off delay; sleeping Windows")
-                        try:
-                            sleep_windows()
-                            monitor_off = None
-                            next_check = time.monotonic() + args.resume_grace_seconds
-                            continue
-                        except OSError:
-                            logging.exception("Windows sleep request failed")
-                            monitor_off = None
-                            next_check = now + args.recheck_seconds
-            elif idle >= args.idle_seconds and now >= next_check:
+            if idle >= args.idle_seconds and now >= next_check:
                 logging.info("Raw Input idle for %.1fs; checking camera", idle)
                 check_sequence = snapshot.activity_sequence
                 status, detail = detect_person(args)
@@ -326,34 +222,28 @@ def main() -> int:
                 elif status == "present":
                     logging.info("Person detected%s", f": {detail}" if detail else "")
                 elif status == "absent":
-                    monitor_off = MonitorOffState(
-                        sleep_deadline=time.monotonic() + args.sleep_delay_seconds,
-                        activity_sequence=post_check.activity_sequence,
-                        intentional_sequence=post_check.intentional_sequence,
-                        cursor_distance=post_check.cursor_distance,
-                    )
                     if args.dry_run:
-                        logging.warning("DRY RUN: no face detected; would turn off monitors")
+                        logging.warning("DRY RUN: no face detected; would sleep Windows")
                     else:
-                        logging.warning("No face detected; turning off monitors")
-                        try:
-                            turn_off_monitors()
-                        except OSError:
-                            logging.exception("Monitor standby request failed; staying awake")
-                            monitor_off = None
-                            next_check = time.monotonic() + args.recheck_seconds
+                        # Do not suspend if input arrived after camera inference.
+                        final_snapshot = input_tracker.activity_snapshot()
+                        if final_snapshot.activity_sequence != post_check.activity_sequence:
+                            logging.info("Physical input resumed before sleep; staying awake")
                             continue
-                    logging.info(
-                        "Waiting %.0fs for physical input before sleep",
-                        args.sleep_delay_seconds,
-                    )
+                        logging.warning("No face detected; sleeping Windows")
+                        try:
+                            sleep_windows()
+                            next_check = time.monotonic() + args.resume_grace_seconds
+                            continue
+                        except OSError:
+                            logging.exception("Windows sleep request failed")
                 else:
                     # Fail safe: camera/model errors must never cause sleep.
                     logging.error("Presence check failed; staying awake: %s", detail)
 
                 next_check = time.monotonic() + args.recheck_seconds
 
-            time.sleep(min(args.poll_seconds, 0.1) if monitor_off is not None else args.poll_seconds)
+            time.sleep(args.poll_seconds)
     finally:
         input_tracker.stop()
 
