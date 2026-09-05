@@ -21,6 +21,10 @@ from raw_input_tracker import RawInputTracker
 
 APP_NAME = "PresenceGuard"
 ERROR_ALREADY_EXISTS = 183
+HWND_BROADCAST = 0xFFFF
+WM_SYSCOMMAND = 0x0112
+SC_MONITORPOWER = 0xF170
+MONITOR_OFF = 2
 
 
 def app_data_dir() -> Path:
@@ -121,10 +125,20 @@ def sleep_windows() -> None:
         raise ctypes.WinError()
 
 
+def turn_off_monitors() -> None:
+    if not ctypes.windll.user32.PostMessageW(
+        HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, MONITOR_OFF
+    ):
+        raise ctypes.WinError()
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Sleep Windows when idle and no person is visible")
+    parser = argparse.ArgumentParser(
+        description="Turn off monitors, then sleep Windows when idle and no face is visible"
+    )
     parser.add_argument("--idle-seconds", type=float, default=120)
     parser.add_argument("--recheck-seconds", type=float, default=30)
+    parser.add_argument("--sleep-delay-seconds", type=float, default=300)
     parser.add_argument("--poll-seconds", type=float, default=2)
     parser.add_argument("--heartbeat-seconds", type=float, default=300)
     parser.add_argument("--resume-grace-seconds", type=float, default=120)
@@ -142,6 +156,7 @@ def validate_args(args: argparse.Namespace) -> None:
     positive = (
         "idle_seconds",
         "recheck_seconds",
+        "sleep_delay_seconds",
         "poll_seconds",
         "heartbeat_seconds",
         "resume_grace_seconds",
@@ -192,6 +207,7 @@ def main() -> int:
     )
     next_check = 0.0
     next_heartbeat = time.monotonic() + args.heartbeat_seconds
+    sleep_deadline: float | None = None
 
     try:
         while not stopping:
@@ -201,7 +217,29 @@ def main() -> int:
                 logging.info("Heartbeat: Raw Input idle for %.1fs", idle)
                 next_heartbeat = now + args.heartbeat_seconds
 
-            if idle >= args.idle_seconds and now >= next_check:
+            if sleep_deadline is not None:
+                if idle < args.idle_seconds:
+                    logging.info("Physical input resumed; delayed sleep cancelled")
+                    sleep_deadline = None
+                    next_check = 0.0
+                elif now >= sleep_deadline:
+                    if args.dry_run:
+                        logging.warning("DRY RUN: delayed sleep expired; would sleep Windows")
+                        sleep_deadline = None
+                        next_check = now + args.recheck_seconds
+                    else:
+                        logging.warning("No physical input during monitor-off delay; sleeping Windows")
+                        try:
+                            sleep_windows()
+                            sleep_deadline = None
+                            next_check = time.monotonic() + args.resume_grace_seconds
+                            continue
+                        except OSError:
+                            logging.exception("Windows sleep request failed")
+                            sleep_deadline = None
+                            next_check = now + args.recheck_seconds
+
+            elif idle >= args.idle_seconds and now >= next_check:
                 logging.info("Raw Input idle for %.1fs; checking camera", idle)
                 status, detail = detect_person(args)
 
@@ -213,15 +251,20 @@ def main() -> int:
                     logging.info("Person detected%s", f": {detail}" if detail else "")
                 elif status == "absent":
                     if args.dry_run:
-                        logging.warning("DRY RUN: no person detected; would sleep Windows")
+                        logging.warning("DRY RUN: no face detected; would turn off monitors")
                     else:
-                        logging.warning("No person detected; sleeping Windows")
+                        logging.warning("No face detected; turning off monitors")
                         try:
-                            sleep_windows()
-                            next_check = time.monotonic() + args.resume_grace_seconds
-                            continue
+                            turn_off_monitors()
                         except OSError:
-                            logging.exception("Windows sleep request failed")
+                            logging.exception("Monitor standby request failed; staying awake")
+                            next_check = time.monotonic() + args.recheck_seconds
+                            continue
+                    sleep_deadline = time.monotonic() + args.sleep_delay_seconds
+                    logging.info(
+                        "Waiting %.0fs for physical input before sleep",
+                        args.sleep_delay_seconds,
+                    )
                 else:
                     # Fail safe: camera/model errors must never cause sleep.
                     logging.error("Presence check failed; staying awake: %s", detail)

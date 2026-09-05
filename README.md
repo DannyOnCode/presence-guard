@@ -2,12 +2,14 @@
 
 Presence Guard is a lightweight Windows background watcher. After two minutes
 without physical keyboard or mouse Raw Input, it briefly opens the webcam and
-checks five frames for a face. Windows sleeps only when every frame has no
-face. Software-injected input from games and automation does not renew the
-timer. Bags, legs, and other body-only detections do not count as active use.
+checks five frames for a face. If no face is found, the monitors enter standby.
+If there is still no physical input for another five minutes, Windows sleeps.
+Software-injected input from games and automation does not renew the timer.
+Bags, legs, and other body-only detections do not count as active use.
 
 Camera failures, model errors, timeouts, and input during detection all fail
-safe and leave the PC awake. Frames are processed locally and are never saved.
+safe and leave the PC awake. Any input during the five-minute monitor-off
+period cancels sleep. Frames are processed locally and are never saved.
 
 ## Install
 
@@ -75,6 +77,7 @@ Common options:
 ```text
 --idle-seconds 120       Time without input before checking
 --recheck-seconds 30     Delay before checking again when you remain idle
+--sleep-delay-seconds 300  Delay between monitor standby and PC sleep
 --heartbeat-seconds 300  Interval for diagnostic idle-time log entries
 --camera 0               Webcam index; try 1 for a second camera
 --confidence 0.65        Face-detection confidence threshold
