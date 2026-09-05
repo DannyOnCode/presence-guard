@@ -208,6 +208,7 @@ def main() -> int:
     next_check = 0.0
     next_heartbeat = time.monotonic() + args.heartbeat_seconds
     sleep_deadline: float | None = None
+    grace_activity_sequence = 0
 
     try:
         while not stopping:
@@ -218,10 +219,45 @@ def main() -> int:
                 next_heartbeat = now + args.heartbeat_seconds
 
             if sleep_deadline is not None:
-                if idle < args.idle_seconds:
-                    logging.info("Physical input resumed; delayed sleep cancelled")
-                    sleep_deadline = None
-                    next_check = 0.0
+                sequence, event_detail, intentional = input_tracker.activity_snapshot()
+                if sequence != grace_activity_sequence:
+                    if intentional:
+                        logging.info(
+                            "Keyboard/button input resumed; delayed sleep cancelled: %s",
+                            event_detail,
+                        )
+                        sleep_deadline = None
+                        next_check = 0.0
+                    else:
+                        logging.info(
+                            "Mouse movement during monitor-off delay; confirming face: %s",
+                            event_detail,
+                        )
+                        status, detail = detect_person(args)
+                        grace_activity_sequence = input_tracker.activity_snapshot()[0]
+                        if status == "present":
+                            logging.info(
+                                "Face confirmed after mouse movement; delayed sleep cancelled: %s",
+                                detail,
+                            )
+                            sleep_deadline = None
+                            next_check = 0.0
+                        elif status == "absent":
+                            logging.warning(
+                                "No face after mouse movement; preserving delayed sleep"
+                            )
+                            if not args.dry_run:
+                                try:
+                                    turn_off_monitors()
+                                except OSError:
+                                    logging.exception("Monitor standby request failed")
+                        else:
+                            logging.error(
+                                "Face confirmation failed; delayed sleep cancelled: %s",
+                                detail,
+                            )
+                            sleep_deadline = None
+                            next_check = 0.0
                 elif now >= sleep_deadline:
                     if args.dry_run:
                         logging.warning("DRY RUN: delayed sleep expired; would sleep Windows")
@@ -261,6 +297,7 @@ def main() -> int:
                             next_check = time.monotonic() + args.recheck_seconds
                             continue
                     sleep_deadline = time.monotonic() + args.sleep_delay_seconds
+                    grace_activity_sequence = input_tracker.activity_snapshot()[0]
                     logging.info(
                         "Waiting %.0fs for physical input before sleep",
                         args.sleep_delay_seconds,

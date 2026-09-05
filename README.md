@@ -8,8 +8,11 @@ Software-injected input from games and automation does not renew the timer.
 Bags, legs, and other body-only detections do not count as active use.
 
 Camera failures, model errors, timeouts, and input during detection all fail
-safe and leave the PC awake. Any input during the five-minute monitor-off
-period cancels sleep. Frames are processed locally and are never saved.
+safe and leave the PC awake. Keyboard input or a mouse button during the
+five-minute monitor-off period cancels sleep. Movement-only mouse input is
+confirmed by the face detector, preventing noisy mouse sensors from cancelling
+sleep or leaving the monitor awake. Frames are processed locally and are never
+saved.
 
 ## Install
 
