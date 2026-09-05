@@ -26,11 +26,14 @@ HWND_BROADCAST = 0xFFFF
 WM_SYSCOMMAND = 0x0112
 SC_MONITORPOWER = 0xF170
 MONITOR_OFF = 2
+SMTO_ABORTIFHUNG = 0x0002
+STANDBY_RETRY_SECONDS = 5.0
 
 
 @dataclass
 class MonitorOffState:
     sleep_deadline: float
+    next_standby_request: float
     activity_sequence: int
     intentional_sequence: int
     cursor_distance: float
@@ -136,10 +139,35 @@ def sleep_windows() -> None:
 
 
 def turn_off_monitors() -> None:
-    if not ctypes.windll.user32.PostMessageW(
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.SendMessageTimeoutW.argtypes = [
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+        wintypes.UINT,
+        wintypes.UINT,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    user32.SendMessageTimeoutW.restype = wintypes.LPARAM
+    result = ctypes.c_size_t()
+    if user32.SendMessageTimeoutW(
+        HWND_BROADCAST,
+        WM_SYSCOMMAND,
+        SC_MONITORPOWER,
+        MONITOR_OFF,
+        SMTO_ABORTIFHUNG,
+        2_000,
+        ctypes.byref(result),
+    ):
+        return
+
+    # A hung top-level window can make the broadcast time out even when other
+    # recipients handled it. Queue a fallback rather than abandoning standby.
+    if not user32.PostMessageW(
         HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, MONITOR_OFF
     ):
-        raise ctypes.WinError()
+        raise ctypes.WinError(ctypes.get_last_error())
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -288,6 +316,12 @@ def main() -> int:
                             logging.exception("Windows sleep request failed")
                             monitor_off = None
                             next_check = now + args.recheck_seconds
+                elif now >= monitor_off.next_standby_request:
+                    try:
+                        turn_off_monitors()
+                    except OSError:
+                        logging.exception("Monitor standby retry failed")
+                    monitor_off.next_standby_request = now + STANDBY_RETRY_SECONDS
 
             elif idle >= args.idle_seconds and now >= next_check:
                 logging.info("Raw Input idle for %.1fs; checking camera", idle)
@@ -303,6 +337,7 @@ def main() -> int:
                 elif status == "absent":
                     monitor_off = MonitorOffState(
                         sleep_deadline=time.monotonic() + args.sleep_delay_seconds,
+                        next_standby_request=time.monotonic() + STANDBY_RETRY_SECONDS,
                         activity_sequence=post_check.activity_sequence,
                         intentional_sequence=post_check.intentional_sequence,
                         cursor_distance=post_check.cursor_distance,
