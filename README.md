@@ -9,10 +9,10 @@ Bags, legs, and other body-only detections do not count as active use.
 
 Camera failures, model errors, timeouts, and input during detection all fail
 safe and leave the PC awake. Keyboard input or a mouse button during the
-five-minute monitor-off period cancels sleep. Movement-only mouse input is
-confirmed by the face detector, preventing noisy mouse sensors from cancelling
-sleep or leaving the monitor awake. Frames are processed locally and are never
-saved.
+five-minute monitor-off period cancels sleep. Movement-only mouse input cancels
+sleep after the visible cursor accumulates 40 pixels of travel. Smaller cursor
+movements settle after one second and the monitor returns to standby. Frames
+are processed locally and are never saved.
 
 ## Install
 
@@ -81,6 +81,7 @@ Common options:
 --idle-seconds 120       Time without input before checking
 --recheck-seconds 30     Delay before checking again when you remain idle
 --sleep-delay-seconds 300  Delay between monitor standby and PC sleep
+--cursor-distance 40     Cursor travel needed to cancel delayed sleep
 --heartbeat-seconds 300  Interval for diagnostic idle-time log entries
 --camera 0               Webcam index; try 1 for a second camera
 --confidence 0.65        Face-detection confidence threshold

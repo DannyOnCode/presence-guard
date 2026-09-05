@@ -8,6 +8,7 @@ from ctypes import wintypes
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+import math
 import os
 from pathlib import Path
 import signal
@@ -132,6 +133,13 @@ def turn_off_monitors() -> None:
         raise ctypes.WinError()
 
 
+def cursor_position() -> tuple[int, int]:
+    point = wintypes.POINT()
+    if not ctypes.windll.user32.GetCursorPos(ctypes.byref(point)):
+        raise ctypes.WinError()
+    return point.x, point.y
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Turn off monitors, then sleep Windows when idle and no face is visible"
@@ -139,6 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--idle-seconds", type=float, default=120)
     parser.add_argument("--recheck-seconds", type=float, default=30)
     parser.add_argument("--sleep-delay-seconds", type=float, default=300)
+    parser.add_argument("--cursor-distance", type=float, default=40)
     parser.add_argument("--poll-seconds", type=float, default=2)
     parser.add_argument("--heartbeat-seconds", type=float, default=300)
     parser.add_argument("--resume-grace-seconds", type=float, default=120)
@@ -157,6 +166,7 @@ def validate_args(args: argparse.Namespace) -> None:
         "idle_seconds",
         "recheck_seconds",
         "sleep_delay_seconds",
+        "cursor_distance",
         "poll_seconds",
         "heartbeat_seconds",
         "resume_grace_seconds",
@@ -209,6 +219,9 @@ def main() -> int:
     next_heartbeat = time.monotonic() + args.heartbeat_seconds
     sleep_deadline: float | None = None
     grace_activity_sequence = 0
+    grace_cursor_position = cursor_position()
+    grace_cursor_distance = 0.0
+    movement_settle_deadline: float | None = None
 
     try:
         while not stopping:
@@ -229,35 +242,34 @@ def main() -> int:
                         sleep_deadline = None
                         next_check = 0.0
                     else:
-                        logging.info(
-                            "Mouse movement during monitor-off delay; confirming face: %s",
-                            event_detail,
+                        current_cursor_position = cursor_position()
+                        grace_cursor_distance += math.dist(
+                            grace_cursor_position, current_cursor_position
                         )
-                        status, detail = detect_person(args)
-                        grace_activity_sequence = input_tracker.activity_snapshot()[0]
-                        if status == "present":
+                        grace_cursor_position = current_cursor_position
+                        grace_activity_sequence = sequence
+                        movement_settle_deadline = now + 1.0
+                        if grace_cursor_distance >= args.cursor_distance:
                             logging.info(
-                                "Face confirmed after mouse movement; delayed sleep cancelled: %s",
-                                detail,
+                                "Cursor traveled %.1fpx; delayed sleep cancelled: %s",
+                                grace_cursor_distance,
+                                event_detail,
                             )
                             sleep_deadline = None
                             next_check = 0.0
-                        elif status == "absent":
-                            logging.warning(
-                                "No face after mouse movement; preserving delayed sleep"
-                            )
-                            if not args.dry_run:
-                                try:
-                                    turn_off_monitors()
-                                except OSError:
-                                    logging.exception("Monitor standby request failed")
-                        else:
-                            logging.error(
-                                "Face confirmation failed; delayed sleep cancelled: %s",
-                                detail,
-                            )
-                            sleep_deadline = None
-                            next_check = 0.0
+                elif movement_settle_deadline is not None and now >= movement_settle_deadline:
+                    logging.info(
+                        "Cursor movement settled at %.1fpx below threshold; preserving delayed sleep",
+                        grace_cursor_distance,
+                    )
+                    if not args.dry_run:
+                        try:
+                            turn_off_monitors()
+                        except OSError:
+                            logging.exception("Monitor standby request failed")
+                    grace_cursor_position = cursor_position()
+                    grace_cursor_distance = 0.0
+                    movement_settle_deadline = None
                 elif now >= sleep_deadline:
                     if args.dry_run:
                         logging.warning("DRY RUN: delayed sleep expired; would sleep Windows")
@@ -298,6 +310,9 @@ def main() -> int:
                             continue
                     sleep_deadline = time.monotonic() + args.sleep_delay_seconds
                     grace_activity_sequence = input_tracker.activity_snapshot()[0]
+                    grace_cursor_position = cursor_position()
+                    grace_cursor_distance = 0.0
+                    movement_settle_deadline = None
                     logging.info(
                         "Waiting %.0fs for physical input before sleep",
                         args.sleep_delay_seconds,
@@ -308,7 +323,7 @@ def main() -> int:
 
                 next_check = time.monotonic() + args.recheck_seconds
 
-            time.sleep(args.poll_seconds)
+            time.sleep(min(args.poll_seconds, 0.1) if sleep_deadline is not None else args.poll_seconds)
     finally:
         input_tracker.stop()
 
