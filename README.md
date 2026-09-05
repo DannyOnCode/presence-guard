@@ -1,15 +1,15 @@
 # Presence Guard
 
-Presence Guard is a lightweight Windows background watcher. After two minutes
+Presence Guard is a lightweight Windows background watcher. After three minutes
 without physical keyboard or mouse Raw Input, it briefly opens the webcam and
 checks five frames for a face. If no face is found, the monitors enter standby.
-If there is still no physical input for another five minutes, Windows sleeps.
+If there is still no physical input for another ten minutes, Windows sleeps.
 Software-injected input from games and automation does not renew the timer.
 Bags, legs, and other body-only detections do not count as active use.
 
 Camera failures, model errors, timeouts, and input during detection all fail
 safe and leave the PC awake. Keyboard input or a mouse button during the
-five-minute monitor-off period cancels sleep. Movement-only mouse input cancels
+ten-minute monitor-off period cancels sleep. Movement-only mouse input cancels
 sleep after the visible cursor accumulates 40 pixels of travel. Smaller cursor
 movements settle after one second and the monitor returns to standby. Frames
 are processed locally and are never saved.
@@ -48,7 +48,7 @@ Logs are stored at `%LOCALAPPDATA%\PresenceGuard\presence_guard.log`.
 
 The ready-to-run Windows build is `dist\PresenceGuard.exe`. It includes Python
 and OpenCV, so the target PC does not need Python installed. Double-click it to
-run invisibly with the default two-minute threshold, or test it safely from a
+run invisibly with the default three-minute threshold, or test it safely from a
 terminal first:
 
 ```powershell
@@ -78,9 +78,9 @@ Manager by ending `pythonw.exe`.
 Common options:
 
 ```text
---idle-seconds 120       Time without input before checking
+--idle-seconds 180       Time without input before checking
 --recheck-seconds 30     Delay before checking again when you remain idle
---sleep-delay-seconds 300  Delay between monitor standby and PC sleep
+--sleep-delay-seconds 600  Delay between monitor standby and PC sleep
 --cursor-distance 40     Cursor travel needed to cancel delayed sleep
 --heartbeat-seconds 300  Interval for diagnostic idle-time log entries
 --camera 0               Webcam index; try 1 for a second camera

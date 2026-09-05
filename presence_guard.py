@@ -172,9 +172,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Turn off monitors, then sleep Windows when idle and no face is visible"
     )
-    parser.add_argument("--idle-seconds", type=float, default=120)
+    parser.add_argument("--idle-seconds", type=float, default=180)
     parser.add_argument("--recheck-seconds", type=float, default=30)
-    parser.add_argument("--sleep-delay-seconds", type=float, default=300)
+    parser.add_argument("--sleep-delay-seconds", type=float, default=600)
     parser.add_argument("--cursor-distance", type=float, default=40)
     parser.add_argument("--poll-seconds", type=float, default=2)
     parser.add_argument("--heartbeat-seconds", type=float, default=300)
