@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+
+build/
+dist/
+*.spec
+
+.venv/
+venv/
+
+models/
+*.log
+*.download
