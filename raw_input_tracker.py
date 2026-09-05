@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+from dataclasses import dataclass
+import math
 import threading
 import time
 
@@ -53,6 +55,8 @@ USER32.GetRawInputDeviceInfoW.argtypes = [
     ctypes.POINTER(wintypes.UINT),
 ]
 USER32.GetRawInputDeviceInfoW.restype = wintypes.UINT
+USER32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+USER32.GetCursorPos.restype = wintypes.BOOL
 
 
 class WNDCLASSW(ctypes.Structure):
@@ -132,14 +136,27 @@ class RAWINPUT(ctypes.Structure):
     _fields_ = [("header", RAWINPUTHEADER), ("data", RAWINPUTDATA)]
 
 
+@dataclass(frozen=True)
+class ActivitySnapshot:
+    activity_sequence: int
+    intentional_sequence: int
+    cursor_distance: float
+    last_activity: float
+    detail: str
+
+
 class RawInputTracker:
     """Tracks time since the last physical keyboard or mouse HID packet."""
 
     def __init__(self) -> None:
         self._last_activity = time.monotonic()
         self._last_event = "watcher startup"
-        self._last_event_intentional = False
         self._activity_sequence = 0
+        self._intentional_sequence = 0
+        self._cursor_distance = 0.0
+        self._cursor_position = self._get_cursor_position()
+        self._lock = threading.Lock()
+        self._device_names: dict[int, str] = {}
         self._ready = threading.Event()
         self._error: BaseException | None = None
         self._thread_id = 0
@@ -155,17 +172,31 @@ class RawInputTracker:
 
     def stop(self) -> None:
         if self._thread_id:
-            ctypes.windll.user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
+            if not USER32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0):
+                raise ctypes.WinError(ctypes.get_last_error())
             self._thread.join(timeout=2)
+            if self._thread.is_alive():
+                raise RuntimeError("Raw Input listener did not stop")
 
     def idle_seconds(self) -> float:
-        return time.monotonic() - self._last_activity
+        with self._lock:
+            return time.monotonic() - self._last_activity
 
-    def last_event(self) -> str:
-        return self._last_event
+    def activity_snapshot(self) -> ActivitySnapshot:
+        with self._lock:
+            return ActivitySnapshot(
+                activity_sequence=self._activity_sequence,
+                intentional_sequence=self._intentional_sequence,
+                cursor_distance=self._cursor_distance,
+                last_activity=self._last_activity,
+                detail=self._last_event,
+            )
 
-    def activity_snapshot(self) -> tuple[int, str, bool]:
-        return self._activity_sequence, self._last_event, self._last_event_intentional
+    def check_health(self) -> None:
+        if self._error:
+            raise RuntimeError("Raw Input listener failed") from self._error
+        if self._ready.is_set() and not self._thread.is_alive():
+            raise RuntimeError("Raw Input listener stopped unexpectedly")
 
     def _handle_message(
         self,
@@ -175,16 +206,33 @@ class RawInputTracker:
         lparam: int,
     ) -> int:
         if message == WM_INPUT:
-            meaningful, detail, intentional = self._read_input(lparam)
+            meaningful, detail, intentional, mouse_movement = self._read_input(lparam)
             if meaningful:
-                self._last_activity = time.monotonic()
-                self._last_event = detail
-                self._last_event_intentional = intentional
-                self._activity_sequence += 1
+                now = time.monotonic()
+                with self._lock:
+                    if mouse_movement:
+                        position = self._get_cursor_position()
+                        self._cursor_distance += math.dist(self._cursor_position, position)
+                        self._cursor_position = position
+                    self._last_activity = now
+                    self._last_event = detail
+                    self._activity_sequence += 1
+                    if intentional:
+                        self._intentional_sequence += 1
         return USER32.DefWindowProcW(hwnd, message, wparam, lparam)
 
     @staticmethod
-    def _device_name(device_handle: int) -> str:
+    def _get_cursor_position() -> tuple[int, int]:
+        point = wintypes.POINT()
+        if not USER32.GetCursorPos(ctypes.byref(point)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return point.x, point.y
+
+    def _device_name(self, device_handle: int) -> str:
+        handle_value = int(device_handle or 0)
+        cached = self._device_names.get(handle_value)
+        if cached:
+            return cached
         size = wintypes.UINT()
         if USER32.GetRawInputDeviceInfoW(
             device_handle, RIDI_DEVICENAME, None, ctypes.byref(size)
@@ -198,29 +246,30 @@ class RawInputTracker:
             ctypes.byref(size),
         ) == 0xFFFFFFFF:
             return "unknown device"
-        return buffer.value or "unknown device"
+        name = buffer.value or "unknown device"
+        self._device_names[handle_value] = name
+        return name
 
-    @classmethod
-    def _read_input(cls, raw_input_handle: int) -> tuple[bool, str, bool]:
+    def _read_input(self, raw_input_handle: int) -> tuple[bool, str, bool, bool]:
         size = wintypes.UINT()
         header_size = ctypes.sizeof(RAWINPUTHEADER)
         if USER32.GetRawInputData(
             raw_input_handle, RID_INPUT, None, ctypes.byref(size), header_size
         ) == 0xFFFFFFFF:
-            return False, "unreadable Raw Input", False
+            return False, "unreadable Raw Input", False, False
 
         buffer = ctypes.create_string_buffer(size.value)
         if USER32.GetRawInputData(
             raw_input_handle, RID_INPUT, buffer, ctypes.byref(size), header_size
         ) == 0xFFFFFFFF:
-            return False, "unreadable Raw Input", False
+            return False, "unreadable Raw Input", False, False
 
         raw = ctypes.cast(buffer, ctypes.POINTER(RAWINPUT)).contents
-        device = cls._device_name(raw.header.hDevice)
+        device = self._device_name(raw.header.hDevice)
         if raw.header.dwType == RIM_TYPEKEYBOARD:
-            return True, f"keyboard event from {device}", True
+            return True, f"keyboard event from {device}", True, False
         if raw.header.dwType != RIM_TYPEMOUSE:
-            return False, f"unsupported Raw Input from {device}", False
+            return False, f"unsupported Raw Input from {device}", False, False
 
         mouse = raw.data.mouse
         meaningful = bool(
@@ -234,7 +283,8 @@ class RawInputTracker:
             f"buttons=0x{mouse.buttons.data.usButtonFlags:04x} from {device}"
         )
         intentional = bool(mouse.buttons.data.usButtonFlags or mouse.ulRawButtons)
-        return meaningful, detail, intentional
+        mouse_movement = bool(mouse.lLastX or mouse.lLastY)
+        return meaningful, detail, intentional, mouse_movement
 
     def _message_loop(self) -> None:
         user32 = USER32
@@ -244,6 +294,8 @@ class RawInputTracker:
 
         try:
             self._thread_id = kernel32.GetCurrentThreadId()
+            kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+            kernel32.GetModuleHandleW.restype = wintypes.HMODULE
             instance = kernel32.GetModuleHandleW(None)
 
             user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]

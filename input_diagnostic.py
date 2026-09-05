@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import ctypes
 from ctypes import wintypes
-import math
 import time
 
 from raw_input_tracker import RawInputTracker
@@ -46,8 +45,7 @@ def main() -> int:
 
     tracker = RawInputTracker()
     tracker.start()
-    previous_sequence, _detail, _intentional = tracker.activity_snapshot()
-    previous_position = cursor_position()
+    previous_snapshot = tracker.activity_snapshot()
     cumulative_distance = 0.0
     started = time.monotonic()
     print(f"Watching Raw Input sources for {args.seconds:.0f} seconds...", flush=True)
@@ -57,21 +55,21 @@ def main() -> int:
     try:
         while time.monotonic() - started < args.seconds:
             time.sleep(0.1)
-            sequence, detail, intentional = tracker.activity_snapshot()
-            if sequence != previous_sequence:
+            snapshot = tracker.activity_snapshot()
+            if snapshot.activity_sequence != previous_snapshot.activity_sequence:
                 elapsed = time.monotonic() - started
                 position = cursor_position()
-                distance = math.dist(previous_position, position)
+                distance = snapshot.cursor_distance - previous_snapshot.cursor_distance
                 cumulative_distance += distance
-                skipped = sequence - previous_sequence - 1
+                skipped = snapshot.activity_sequence - previous_snapshot.activity_sequence - 1
+                intentional = snapshot.intentional_sequence != previous_snapshot.intentional_sequence
                 print(
                     f"{elapsed:5.1f}s | cursor={position} moved={distance:6.1f}px "
                     f"total={cumulative_distance:7.1f}px skipped={skipped} "
-                    f"intentional={intentional} | {detail}",
+                    f"intentional={intentional} | {snapshot.detail}",
                     flush=True,
                 )
-                previous_sequence = sequence
-                previous_position = position
+                previous_snapshot = snapshot
     finally:
         tracker.stop()
         if args.monitor_off:

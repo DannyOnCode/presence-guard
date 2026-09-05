@@ -42,9 +42,9 @@ def download_model() -> Path:
     return destination
 
 
-def load_network(cv2: object) -> object:
+def load_network(cv2: object, minimum_score: float = 0.5) -> object:
     return cv2.FaceDetectorYN.create(
-        str(download_model()), "", (320, 320), 0.5, 0.3, 5000
+        str(download_model()), "", (320, 320), minimum_score, 0.3, 5000
     )
 
 
@@ -80,8 +80,10 @@ def face_detections(
     return detections
 
 
-def frame_person_score(cv2: object, network: object, frame: object) -> float:
-    detections = face_detections(cv2, network, frame, minimum_score=0.5)
+def frame_person_score(
+    cv2: object, network: object, frame: object, minimum_score: float = 0.5
+) -> float:
+    detections = face_detections(cv2, network, frame, minimum_score)
     return max((score for score, _box in detections), default=0.0)
 
 
@@ -113,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     try:
-        network = load_network(cv2)
+        network = load_network(cv2, args.confidence)
 
         backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
         camera = cv2.VideoCapture(args.camera, backend)
@@ -140,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
                     time.sleep(0.1)
                     continue
                 successful_frames += 1
-                person_score = frame_person_score(cv2, network, frame)
+                person_score = frame_person_score(cv2, network, frame, args.confidence)
                 best_person_score = max(best_person_score, person_score)
                 if person_score >= args.confidence:
                     return result(
