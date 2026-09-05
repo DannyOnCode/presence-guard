@@ -1,8 +1,10 @@
 # Presence Guard
 
 Presence Guard is a lightweight Windows background watcher. After two minutes
-without keyboard or mouse input, it briefly opens the webcam and checks five
-frames for a person. Windows sleeps only when every frame has no person.
+without physical keyboard or mouse Raw Input, it briefly opens the webcam and
+checks five frames for a person. Windows sleeps only when every frame has no
+person. Software-injected input from games and automation does not renew the
+timer.
 
 Camera failures, model errors, timeouts, and input during detection all fail
 safe and leave the PC awake. Frames are processed locally and are never saved.
@@ -73,6 +75,7 @@ Common options:
 ```text
 --idle-seconds 120       Time without input before checking
 --recheck-seconds 30     Delay before checking again when you remain idle
+--heartbeat-seconds 300  Interval for diagnostic idle-time log entries
 --camera 0               Webcam index; try 1 for a second camera
 --confidence 0.35        Person-detection threshold
 --frames 5               All frames must be person-free before sleep

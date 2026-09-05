@@ -16,13 +16,11 @@ import sys
 import tempfile
 import time
 
+from raw_input_tracker import RawInputTracker
+
 
 APP_NAME = "PresenceGuard"
 ERROR_ALREADY_EXISTS = 183
-
-
-class LASTINPUTINFO(ctypes.Structure):
-    _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
 
 
 def app_data_dir() -> Path:
@@ -60,15 +58,6 @@ def ensure_single_instance() -> object:
     if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
         raise RuntimeError("Presence Guard is already running")
     return handle
-
-
-def idle_seconds() -> float:
-    info = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
-    if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
-        raise ctypes.WinError()
-    current_tick = ctypes.windll.kernel32.GetTickCount()
-    elapsed_ms = ctypes.c_uint32(current_tick - info.dwTime).value
-    return elapsed_ms / 1000.0
 
 
 def detect_person(args: argparse.Namespace) -> tuple[str, str]:
@@ -137,6 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--idle-seconds", type=float, default=120)
     parser.add_argument("--recheck-seconds", type=float, default=30)
     parser.add_argument("--poll-seconds", type=float, default=2)
+    parser.add_argument("--heartbeat-seconds", type=float, default=300)
     parser.add_argument("--resume-grace-seconds", type=float, default=120)
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--confidence", type=float, default=0.35)
@@ -153,6 +143,7 @@ def validate_args(args: argparse.Namespace) -> None:
         "idle_seconds",
         "recheck_seconds",
         "poll_seconds",
+        "heartbeat_seconds",
         "resume_grace_seconds",
         "frames",
         "detection_timeout",
@@ -181,6 +172,8 @@ def main() -> int:
     configure_logging(args.verbose)
     mutex = ensure_single_instance()
     del mutex  # The kernel handle remains valid for the life of this process.
+    input_tracker = RawInputTracker()
+    input_tracker.start()
 
     stopping = False
 
@@ -192,44 +185,52 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
 
     logging.info(
-        "Started: idle threshold=%ss, camera=%s, dry_run=%s",
+        "Started with Raw Input: idle threshold=%ss, camera=%s, dry_run=%s",
         args.idle_seconds,
         args.camera,
         args.dry_run,
     )
     next_check = 0.0
+    next_heartbeat = time.monotonic() + args.heartbeat_seconds
 
-    while not stopping:
-        idle = idle_seconds()
-        now = time.monotonic()
-        if idle >= args.idle_seconds and now >= next_check:
-            logging.info("Idle for %.1fs; checking camera", idle)
-            status, detail = detect_person(args)
+    try:
+        while not stopping:
+            idle = input_tracker.idle_seconds()
+            now = time.monotonic()
+            if now >= next_heartbeat:
+                logging.info("Heartbeat: Raw Input idle for %.1fs", idle)
+                next_heartbeat = now + args.heartbeat_seconds
 
-            # Input during camera startup/inference always wins.
-            current_idle = idle_seconds()
-            if current_idle < args.idle_seconds:
-                logging.info("Input resumed during camera check; ignoring result")
-            elif status == "present":
-                logging.info("Person detected%s", f": {detail}" if detail else "")
-            elif status == "absent":
-                if args.dry_run:
-                    logging.warning("DRY RUN: no person detected; would sleep Windows")
+            if idle >= args.idle_seconds and now >= next_check:
+                logging.info("Raw Input idle for %.1fs; checking camera", idle)
+                status, detail = detect_person(args)
+
+                # Physical input during camera startup/inference always wins.
+                current_idle = input_tracker.idle_seconds()
+                if current_idle < args.idle_seconds:
+                    logging.info("Physical input resumed during camera check; ignoring result")
+                elif status == "present":
+                    logging.info("Person detected%s", f": {detail}" if detail else "")
+                elif status == "absent":
+                    if args.dry_run:
+                        logging.warning("DRY RUN: no person detected; would sleep Windows")
+                    else:
+                        logging.warning("No person detected; sleeping Windows")
+                        try:
+                            sleep_windows()
+                            next_check = time.monotonic() + args.resume_grace_seconds
+                            continue
+                        except OSError:
+                            logging.exception("Windows sleep request failed")
                 else:
-                    logging.warning("No person detected; sleeping Windows")
-                    try:
-                        sleep_windows()
-                        next_check = time.monotonic() + args.resume_grace_seconds
-                        continue
-                    except OSError:
-                        logging.exception("Windows sleep request failed")
-            else:
-                # Fail safe: camera/model errors must never cause sleep.
-                logging.error("Presence check failed; staying awake: %s", detail)
+                    # Fail safe: camera/model errors must never cause sleep.
+                    logging.error("Presence check failed; staying awake: %s", detail)
 
-            next_check = time.monotonic() + args.recheck_seconds
+                next_check = time.monotonic() + args.recheck_seconds
 
-        time.sleep(args.poll_seconds)
+            time.sleep(args.poll_seconds)
+    finally:
+        input_tracker.stop()
 
     logging.info("Stopped")
     return 0
