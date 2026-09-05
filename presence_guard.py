@@ -129,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-seconds", type=float, default=300)
     parser.add_argument("--resume-grace-seconds", type=float, default=120)
     parser.add_argument("--camera", type=int, default=0)
-    parser.add_argument("--confidence", type=float, default=0.35)
+    parser.add_argument("--confidence", type=float, default=0.65)
     parser.add_argument("--frames", type=int, default=5)
     parser.add_argument("--frame-interval", type=float, default=0.35)
     parser.add_argument("--detection-timeout", type=float, default=30)

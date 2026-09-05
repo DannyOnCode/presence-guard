@@ -11,12 +11,11 @@ import time
 import urllib.request
 
 
-MODEL_BASE = "https://raw.githubusercontent.com/chuanqi305/MobileNet-SSD/master"
-MODEL_FILES = {
-    "deploy.prototxt": f"{MODEL_BASE}/deploy.prototxt",
-    "mobilenet_iter_73000.caffemodel": f"{MODEL_BASE}/mobilenet_iter_73000.caffemodel",
-}
-PERSON_CLASS_ID = 15
+MODEL_URL = (
+    "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/"
+    "face_detection_yunet_2023mar.onnx"
+)
+MODEL_FILENAME = "face_detection_yunet_2023mar.onnx"
 
 
 def model_dir() -> Path:
@@ -26,40 +25,64 @@ def model_dir() -> Path:
     return path
 
 
-def download_models() -> tuple[Path, Path]:
+def download_model() -> Path:
     directory = model_dir()
-    for filename, url in MODEL_FILES.items():
-        destination = directory / filename
-        if destination.is_file() and destination.stat().st_size > 0:
-            continue
-        temporary = destination.with_suffix(destination.suffix + ".download")
-        try:
-            with urllib.request.urlopen(url, timeout=60) as response, temporary.open("wb") as output:
-                while chunk := response.read(1024 * 1024):
-                    output.write(chunk)
-            temporary.replace(destination)
-        finally:
-            temporary.unlink(missing_ok=True)
-    return directory / "deploy.prototxt", directory / "mobilenet_iter_73000.caffemodel"
+    destination = directory / MODEL_FILENAME
+    if destination.is_file() and destination.stat().st_size > 0:
+        return destination
+
+    temporary = destination.with_suffix(destination.suffix + ".download")
+    try:
+        with urllib.request.urlopen(MODEL_URL, timeout=60) as response, temporary.open("wb") as output:
+            while chunk := response.read(1024 * 1024):
+                output.write(chunk)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
 
 
-def frame_has_person(cv2: object, network: object, frame: object, confidence: float) -> bool:
-    blob = cv2.dnn.blobFromImage(
-        frame,
-        scalefactor=0.007843,
-        size=(300, 300),
-        mean=(127.5, 127.5, 127.5),
-        swapRB=False,
-        crop=False,
+def load_network(cv2: object) -> object:
+    return cv2.FaceDetectorYN.create(
+        str(download_model()), "", (320, 320), 0.5, 0.3, 5000
     )
-    network.setInput(blob)
-    detections = network.forward()
-    for index in range(detections.shape[2]):
-        class_id = int(detections[0, 0, index, 1])
-        score = float(detections[0, 0, index, 2])
-        if class_id == PERSON_CLASS_ID and score >= confidence:
-            return True
-    return False
+
+
+def face_detections(
+    cv2: object, network: object, frame: object, minimum_score: float
+) -> list[tuple[float, tuple[int, int, int, int]]]:
+    frame_height, frame_width = frame.shape[:2]
+    network.setInputSize((frame_width, frame_height))
+    _result, faces = network.detect(frame)
+    if faces is None:
+        return []
+
+    detections = []
+    for face in faces:
+        left, top, width, height = face[:4]
+        score = float(face[14])
+        if score < minimum_score:
+            continue
+
+        right = left + width
+        bottom = top + height
+        detections.append(
+            (
+                score,
+                (
+                    max(0, min(frame_width - 1, int(left))),
+                    max(0, min(frame_height - 1, int(top))),
+                    max(0, min(frame_width - 1, int(right))),
+                    max(0, min(frame_height - 1, int(bottom))),
+                ),
+            )
+        )
+    return detections
+
+
+def frame_person_score(cv2: object, network: object, frame: object) -> float:
+    detections = face_detections(cv2, network, frame, minimum_score=0.5)
+    return max((score for score, _box in detections), default=0.0)
 
 
 def result(status: str, detail: str = "", result_file: str | None = None) -> int:
@@ -74,7 +97,7 @@ def result(status: str, detail: str = "", result_file: str | None = None) -> int
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--camera", type=int, default=0)
-    parser.add_argument("--confidence", type=float, default=0.35)
+    parser.add_argument("--confidence", type=float, default=0.65)
     parser.add_argument("--frames", type=int, default=5)
     parser.add_argument("--frame-interval", type=float, default=0.35)
     parser.add_argument("--result-file")
@@ -90,8 +113,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     try:
-        prototxt, weights = download_models()
-        network = cv2.dnn.readNetFromCaffe(str(prototxt), str(weights))
+        network = load_network(cv2)
 
         backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
         camera = cv2.VideoCapture(args.camera, backend)
@@ -109,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
 
             successful_frames = 0
             attempts = 0
+            best_person_score = 0.0
             max_attempts = args.frames * 3
             while successful_frames < args.frames and attempts < max_attempts:
                 attempts += 1
@@ -117,9 +140,13 @@ def main(argv: list[str] | None = None) -> int:
                     time.sleep(0.1)
                     continue
                 successful_frames += 1
-                if frame_has_person(cv2, network, frame, args.confidence):
+                person_score = frame_person_score(cv2, network, frame)
+                best_person_score = max(best_person_score, person_score)
+                if person_score >= args.confidence:
                     return result(
-                        "present", f"detected in frame {successful_frames}", args.result_file
+                        "present",
+                        f"face score={person_score:.3f} in frame {successful_frames}",
+                        args.result_file,
                     )
                 if successful_frames < args.frames:
                     time.sleep(args.frame_interval)
@@ -130,7 +157,11 @@ def main(argv: list[str] | None = None) -> int:
                     f"camera returned only {successful_frames}/{args.frames} usable frames",
                     args.result_file,
                 )
-            return result("absent", f"checked {args.frames} frames", args.result_file)
+            return result(
+                "absent",
+                f"best face score={best_person_score:.3f} across {args.frames} frames",
+                args.result_file,
+            )
         finally:
             camera.release()
     except Exception as error:

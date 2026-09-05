@@ -2,9 +2,9 @@
 
 Presence Guard is a lightweight Windows background watcher. After two minutes
 without physical keyboard or mouse Raw Input, it briefly opens the webcam and
-checks five frames for a person. Windows sleeps only when every frame has no
-person. Software-injected input from games and automation does not renew the
-timer.
+checks five frames for a face. Windows sleeps only when every frame has no
+face. Software-injected input from games and automation does not renew the
+timer. Bags, legs, and other body-only detections do not count as active use.
 
 Camera failures, model errors, timeouts, and input during detection all fail
 safe and leave the PC awake. Frames are processed locally and are never saved.
@@ -17,7 +17,7 @@ Python 3.10 or newer is recommended.
 python -m pip install -r requirements.txt
 ```
 
-The first camera check downloads the approximately 23 MB MobileNet-SSD model
+The first camera check downloads the lightweight OpenCV YuNet face model
 to `%LOCALAPPDATA%\PresenceGuard\models`. Later checks are fully offline.
 
 ## Test safely
@@ -77,7 +77,7 @@ Common options:
 --recheck-seconds 30     Delay before checking again when you remain idle
 --heartbeat-seconds 300  Interval for diagnostic idle-time log entries
 --camera 0               Webcam index; try 1 for a second camera
---confidence 0.35        Person-detection threshold
+--confidence 0.65        Face-detection confidence threshold
 --frames 5               All frames must be person-free before sleep
 --dry-run                Never sleep; only write what would happen to the log
 ```
@@ -109,5 +109,5 @@ zero because inference uses OpenCV's CPU backend.
 Actual CPU time depends on the processor and camera. Measure both phases on the
 target PC rather than relying on estimates from another machine.
 
-The MobileNet-SSD implementation and pretrained model are from
-<https://github.com/chuanqi305/MobileNet-SSD> under its MIT license.
+YuNet is distributed through <https://github.com/opencv/opencv_zoo> under the
+Apache License 2.0.
