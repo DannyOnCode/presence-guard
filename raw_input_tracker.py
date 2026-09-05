@@ -5,8 +5,6 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
-import math
-import queue
 import threading
 import time
 
@@ -17,7 +15,6 @@ RIDEV_INPUTSINK = 0x00000100
 RID_INPUT = 0x10000003
 RIM_TYPEMOUSE = 0
 RIM_TYPEKEYBOARD = 1
-RIDI_DEVICENAME = 0x20000007
 HID_USAGE_PAGE_GENERIC = 0x01
 HID_USAGE_GENERIC_MOUSE = 0x02
 HID_USAGE_GENERIC_KEYBOARD = 0x06
@@ -49,15 +46,6 @@ USER32.GetRawInputData.argtypes = [
     wintypes.UINT,
 ]
 USER32.GetRawInputData.restype = wintypes.UINT
-USER32.GetRawInputDeviceInfoW.argtypes = [
-    wintypes.HANDLE,
-    wintypes.UINT,
-    wintypes.LPVOID,
-    ctypes.POINTER(wintypes.UINT),
-]
-USER32.GetRawInputDeviceInfoW.restype = wintypes.UINT
-USER32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
-USER32.GetCursorPos.restype = wintypes.BOOL
 
 
 class WNDCLASSW(ctypes.Structure):
@@ -140,38 +128,16 @@ class RAWINPUT(ctypes.Structure):
 @dataclass(frozen=True)
 class ActivitySnapshot:
     activity_sequence: int
-    intentional_sequence: int
-    cursor_distance: float
     last_activity: float
-    detail: str
-
-
-@dataclass(frozen=True)
-class MouseInputEvent:
-    timestamp: float
-    raw_dx: int
-    raw_dy: int
-    button_flags: int
-    device: str
-    cursor_position: tuple[int, int]
-    cursor_distance: float
 
 
 class RawInputTracker:
     """Tracks time since the last physical keyboard or mouse HID packet."""
 
-    def __init__(self, record_mouse_events: bool = False) -> None:
+    def __init__(self) -> None:
         self._last_activity = time.monotonic()
-        self._last_event = "watcher startup"
         self._activity_sequence = 0
-        self._intentional_sequence = 0
-        self._cursor_distance = 0.0
-        self._cursor_position = self._get_cursor_position()
         self._lock = threading.Lock()
-        self._device_names: dict[int, str] = {}
-        self._mouse_events: queue.SimpleQueue[MouseInputEvent] | None = (
-            queue.SimpleQueue() if record_mouse_events else None
-        )
         self._ready = threading.Event()
         self._error: BaseException | None = None
         self._thread_id = 0
@@ -193,18 +159,11 @@ class RawInputTracker:
             if self._thread.is_alive():
                 raise RuntimeError("Raw Input listener did not stop")
 
-    def idle_seconds(self) -> float:
-        with self._lock:
-            return time.monotonic() - self._last_activity
-
     def activity_snapshot(self) -> ActivitySnapshot:
         with self._lock:
             return ActivitySnapshot(
                 activity_sequence=self._activity_sequence,
-                intentional_sequence=self._intentional_sequence,
-                cursor_distance=self._cursor_distance,
                 last_activity=self._last_activity,
-                detail=self._last_event,
             )
 
     def check_health(self) -> None:
@@ -213,16 +172,6 @@ class RawInputTracker:
         if self._ready.is_set() and not self._thread.is_alive():
             raise RuntimeError("Raw Input listener stopped unexpectedly")
 
-    def drain_mouse_events(self) -> list[MouseInputEvent]:
-        if self._mouse_events is None:
-            raise RuntimeError("Mouse event recording was not enabled")
-        events = []
-        while True:
-            try:
-                events.append(self._mouse_events.get_nowait())
-            except queue.Empty:
-                return events
-
     def _handle_message(
         self,
         hwnd: wintypes.HWND,
@@ -230,119 +179,39 @@ class RawInputTracker:
         wparam: int,
         lparam: int,
     ) -> int:
-        if message == WM_INPUT:
-            (
-                meaningful,
-                detail,
-                intentional,
-                mouse_movement,
-                raw_dx,
-                raw_dy,
-                button_flags,
-                device,
-            ) = self._read_input(lparam)
-            if meaningful:
-                now = time.monotonic()
-                with self._lock:
-                    cursor_distance = 0.0
-                    if mouse_movement:
-                        position = self._get_cursor_position()
-                        cursor_distance = math.dist(self._cursor_position, position)
-                        self._cursor_distance += cursor_distance
-                        self._cursor_position = position
-                    self._last_activity = now
-                    self._last_event = detail
-                    self._activity_sequence += 1
-                    if intentional:
-                        self._intentional_sequence += 1
-                    if self._mouse_events is not None and device:
-                        self._mouse_events.put(
-                            MouseInputEvent(
-                                timestamp=time.time(),
-                                raw_dx=raw_dx,
-                                raw_dy=raw_dy,
-                                button_flags=button_flags,
-                                device=device,
-                                cursor_position=self._cursor_position,
-                                cursor_distance=cursor_distance,
-                            )
-                        )
+        if message == WM_INPUT and self._is_meaningful_input(lparam):
+            with self._lock:
+                self._last_activity = time.monotonic()
+                self._activity_sequence += 1
         return USER32.DefWindowProcW(hwnd, message, wparam, lparam)
 
     @staticmethod
-    def _get_cursor_position() -> tuple[int, int]:
-        point = wintypes.POINT()
-        if not USER32.GetCursorPos(ctypes.byref(point)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        return point.x, point.y
-
-    def _device_name(self, device_handle: int) -> str:
-        handle_value = int(device_handle or 0)
-        cached = self._device_names.get(handle_value)
-        if cached:
-            return cached
-        size = wintypes.UINT()
-        if USER32.GetRawInputDeviceInfoW(
-            device_handle, RIDI_DEVICENAME, None, ctypes.byref(size)
-        ) == 0xFFFFFFFF:
-            return "unknown device"
-        buffer = ctypes.create_unicode_buffer(size.value + 1)
-        if USER32.GetRawInputDeviceInfoW(
-            device_handle,
-            RIDI_DEVICENAME,
-            ctypes.cast(buffer, wintypes.LPVOID),
-            ctypes.byref(size),
-        ) == 0xFFFFFFFF:
-            return "unknown device"
-        name = buffer.value or "unknown device"
-        self._device_names[handle_value] = name
-        return name
-
-    def _read_input(
-        self, raw_input_handle: int
-    ) -> tuple[bool, str, bool, bool, int, int, int, str]:
+    def _is_meaningful_input(raw_input_handle: int) -> bool:
         size = wintypes.UINT()
         header_size = ctypes.sizeof(RAWINPUTHEADER)
         if USER32.GetRawInputData(
             raw_input_handle, RID_INPUT, None, ctypes.byref(size), header_size
         ) == 0xFFFFFFFF:
-            return False, "unreadable Raw Input", False, False, 0, 0, 0, ""
+            return False
 
         buffer = ctypes.create_string_buffer(size.value)
         if USER32.GetRawInputData(
             raw_input_handle, RID_INPUT, buffer, ctypes.byref(size), header_size
         ) == 0xFFFFFFFF:
-            return False, "unreadable Raw Input", False, False, 0, 0, 0, ""
+            return False
 
         raw = ctypes.cast(buffer, ctypes.POINTER(RAWINPUT)).contents
-        device = self._device_name(raw.header.hDevice)
         if raw.header.dwType == RIM_TYPEKEYBOARD:
-            return True, f"keyboard event from {device}", True, False, 0, 0, 0, ""
+            return True
         if raw.header.dwType != RIM_TYPEMOUSE:
-            return False, f"unsupported Raw Input from {device}", False, False, 0, 0, 0, ""
+            return False
 
         mouse = raw.data.mouse
-        meaningful = bool(
+        return bool(
             mouse.lLastX
             or mouse.lLastY
             or mouse.buttons.data.usButtonFlags
             or mouse.ulRawButtons
-        )
-        detail = (
-            f"mouse event dx={mouse.lLastX} dy={mouse.lLastY} "
-            f"buttons=0x{mouse.buttons.data.usButtonFlags:04x} from {device}"
-        )
-        intentional = bool(mouse.buttons.data.usButtonFlags or mouse.ulRawButtons)
-        mouse_movement = bool(mouse.lLastX or mouse.lLastY)
-        return (
-            meaningful,
-            detail,
-            intentional,
-            mouse_movement,
-            mouse.lLastX,
-            mouse.lLastY,
-            mouse.buttons.data.usButtonFlags,
-            device,
         )
 
     def _message_loop(self) -> None:

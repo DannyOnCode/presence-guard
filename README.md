@@ -109,5 +109,24 @@ zero because inference uses OpenCV's CPU backend.
 Actual CPU time depends on the processor and camera. Measure both phases on the
 target PC rather than relying on estimates from another machine.
 
+## Design considerations
+
+Presence Guard uses Windows sleep rather than sending a monitor-standby
+command. During testing, the monitor sometimes woke while a fullscreen game was
+running, but the cause was not verified. One possible explanation is that an
+application or driver held or renewed a Windows display-power request; another
+is mouse, receiver, or other HID noise. The observations do not establish which
+software or device was responsible, and no claim is made about any particular
+application's implementation.
+
+The computer remained asleep reliably during the same general usage scenario.
+That result is consistent with applications being suspended during system
+sleep, but it does not prove that an application caused the earlier monitor
+wake. Tiny HID events may also wake a monitor without being permitted to wake
+the computer.
+
+An active display request can be checked while a game is focused by running
+`powercfg /requests` from an elevated terminal.
+
 YuNet is distributed through <https://github.com/opencv/opencv_zoo> under the
 Apache License 2.0.
