@@ -27,13 +27,11 @@ WM_SYSCOMMAND = 0x0112
 SC_MONITORPOWER = 0xF170
 MONITOR_OFF = 2
 SMTO_ABORTIFHUNG = 0x0002
-STANDBY_RETRY_SECONDS = 5.0
 
 
 @dataclass
 class MonitorOffState:
     sleep_deadline: float
-    next_standby_request: float
     activity_sequence: int
     intentional_sequence: int
     cursor_distance: float
@@ -316,13 +314,6 @@ def main() -> int:
                             logging.exception("Windows sleep request failed")
                             monitor_off = None
                             next_check = now + args.recheck_seconds
-                elif now >= monitor_off.next_standby_request:
-                    try:
-                        turn_off_monitors()
-                    except OSError:
-                        logging.exception("Monitor standby retry failed")
-                    monitor_off.next_standby_request = now + STANDBY_RETRY_SECONDS
-
             elif idle >= args.idle_seconds and now >= next_check:
                 logging.info("Raw Input idle for %.1fs; checking camera", idle)
                 check_sequence = snapshot.activity_sequence
@@ -337,7 +328,6 @@ def main() -> int:
                 elif status == "absent":
                     monitor_off = MonitorOffState(
                         sleep_deadline=time.monotonic() + args.sleep_delay_seconds,
-                        next_standby_request=time.monotonic() + STANDBY_RETRY_SECONDS,
                         activity_sequence=post_check.activity_sequence,
                         intentional_sequence=post_check.intentional_sequence,
                         cursor_distance=post_check.cursor_distance,
